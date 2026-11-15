@@ -109,9 +109,14 @@ def get_recipe(recipe_id: int):
 # Everything else is returned unchanged on purpose:
 #   no leading number ("salt to taste"), quantity not first ("flour, 200 g"),
 #   fractions ("1/2 cup"), mixed numbers ("1 1/2 cups", "1 ½ cups"),
-#   ranges ("2-3 eggs"), comma decimals ("1,5 l"), non-ASCII digits ("٢٠٠ g", "２００ g").
-LEADING_QUANTITY = re.compile(r"^\s*(\d+(?:\.\d+)?)(?=\s*[A-Za-z]|\s*$)", re.ASCII)
+#   ranges ("2-3 eggs"), comma decimals ("1,5 l"), non-ASCII digits ("٢٠٠ g", "２００ g"),
+#   scientific notation ("1e3 g").
+# The factor must be between MIN_FACTOR and MAX_FACTOR (inclusive), otherwise 422.
+LEADING_QUANTITY = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)(?![eE][+-]?\d)(?=\s*[A-Za-z]|\s*$)", re.ASCII
+)
 
+MIN_FACTOR = 0.001  # smaller factors get a 422
 MAX_FACTOR = 1000  # larger factors get a 422
 MAX_QUANTITY = 1e15  # a scaled result this big (or inf) leaves the ingredient unchanged
 
@@ -142,8 +147,8 @@ def scale_ingredient(ingredient: str, factor: float) -> str:
 def get_scaled_recipe(
     recipe_id: int,
     factor: float = Query(
-        ..., gt=0, le=MAX_FACTOR, allow_inf_nan=False,
-        description=f"multiplier, 0 < factor <= {MAX_FACTOR}",
+        ..., ge=MIN_FACTOR, le=MAX_FACTOR, allow_inf_nan=False,
+        description=f"multiplier, {MIN_FACTOR} <= factor <= {MAX_FACTOR}",
     ),
 ):
     """Same shape as GET /recipes/{id}, ingredients scaled. The stored recipe is not changed."""

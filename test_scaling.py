@@ -122,8 +122,26 @@ def test_largest_allowed_factor():
     assert r.json()["ingredients"] == ["200000 g flour"]
 
 
+def test_smallest_allowed_factor():
+    rid = make_recipe(["200 g flour", "0.5 tsp salt"])
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 0.001})
+    assert r.status_code == 200
+    assert r.json()["ingredients"] == ["0.2 g flour", "0.0005 tsp salt"]
+
+
+def test_scientific_notation_left_unchanged_on_purpose():
+    rid = make_recipe(["1e3 g flour"])
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 2})
+    assert r.json()["ingredients"] == ["1e3 g flour"]
+
+
 @pytest.mark.parametrize(
-    "factor", ["0", "-2", "abc", "", "nan", "inf", "1000.5", "1e300", "1e308", "1e309"]
+    "factor",
+    [
+        "0", "-2", "abc", "", "nan", "inf",
+        "1000.5", "1e300", "1e308", "1e309",
+        "0.0009", "1e-300", "5e-324",
+    ],
 )
 def test_bad_factor_returns_422(factor):
     rid = make_recipe(["200 g flour"])
@@ -152,7 +170,10 @@ def test_missing_factor_returns_422():
         ("2-3 eggs", 2, "2-3 eggs"),
         ("100", 2, "200"),
         ("0.1 tsp salt", 0.01, "0.001 tsp salt"),
-        ("2 eggs", 1e-9, "0.000000002 eggs"),
+        ("2 eggs", 0.001, "0.002 eggs"),
+        ("1e3 g flour", 2, "1e3 g flour"),
+        ("1E-2 kg salt", 2, "1E-2 kg salt"),
+        ("2 eggs", 2, "4 eggs"),
         ("1 1/2 cups flour", 2, "1 1/2 cups flour"),
         ("1 ½ cups flour", 2, "1 ½ cups flour"),
         ("٢٠٠ g flour", 2, "٢٠٠ g flour"),
