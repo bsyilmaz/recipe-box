@@ -93,3 +93,53 @@ def get_recipe(recipe_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="unknown recipe")
     return _row_to_recipe(row)
+
+
+@app.get("/shopping-list")
+def shopping_list(ids: str | None = None):
+    """Merge the ingredients of the given recipes into a de-duplicated list.
+
+    `ids` is a comma-separated list of positive recipe ids, e.g. `?ids=1,2,3`.
+    Ingredients are compared case-insensitively after trimming and collapsing
+    whitespace; the first spelling seen is kept. Order follows the requested
+    recipe order, then each recipe's ingredient order. Blank ingredients are
+    dropped. Repeated ids are counted once.
+    """
+    if ids is None or not ids.strip():
+        raise HTTPException(status_code=400, detail="query parameter 'ids' is required, e.g. ?ids=1,2,3")
+    recipe_ids: list[int] = []
+    for part in ids.split(","):
+        token = part.strip()
+        if not (token.isascii() and token.isdigit()) or int(token) <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid recipe id {token!r}: ids must be positive integers separated by commas",
+            )
+        rid = int(token)
+        if rid not in recipe_ids:
+            recipe_ids.append(rid)
+
+    with closing(get_db()) as conn:
+        placeholders = ",".join("?" * len(recipe_ids))
+        rows = conn.execute(
+            f"SELECT * FROM recipes WHERE id IN ({placeholders})", recipe_ids
+        ).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    missing = [rid for rid in recipe_ids if rid not in by_id]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown recipe id(s): {', '.join(str(m) for m in missing)}",
+        )
+
+    seen: set[str] = set()
+    ingredients: list[str] = []
+    for rid in recipe_ids:
+        for item in json.loads(by_id[rid]["ingredients"]):
+            display = " ".join(str(item).split())
+            key = display.casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ingredients.append(display)
+    return {"recipe_ids": recipe_ids, "ingredients": ingredients, "count": len(ingredients)}
