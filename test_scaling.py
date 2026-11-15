@@ -1,9 +1,17 @@
 import pytest
 from fastapi.testclient import TestClient
 
+import main
 from main import app, format_quantity, scale_ingredient
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def temp_db(tmp_path, monkeypatch):
+    """Each test gets its own empty SQLite file, so the app's recipes.db is never touched."""
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "recipes.db")
+    main.init_db()
 
 
 def make_recipe(ingredients):
@@ -75,7 +83,48 @@ def test_unknown_recipe_returns_404():
     assert r.json()["detail"] == "unknown recipe"
 
 
-@pytest.mark.parametrize("factor", ["0", "-2", "abc", "", "nan", "inf"])
+def test_mixed_numbers_left_unchanged_on_purpose():
+    rid = make_recipe(["1 1/2 cups flour", "1 ½ cups sugar"])
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 2})
+    assert r.json()["ingredients"] == ["1 1/2 cups flour", "1 ½ cups sugar"]
+
+
+def test_non_ascii_digits_left_unchanged_on_purpose():
+    unchanged = ["٢٠٠ g flour", "２００ g sugar"]
+    rid = make_recipe(unchanged)
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 2})
+    assert r.json()["ingredients"] == unchanged
+
+
+def test_leading_whitespace_is_stripped_and_scaled():
+    rid = make_recipe([" 200 g sugar", "\t2 eggs"])
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 2})
+    assert r.json()["ingredients"] == ["400 g sugar", "4 eggs"]
+
+
+def test_quantity_not_first_left_unchanged_on_purpose():
+    rid = make_recipe(["flour, 200 g"])
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 2})
+    assert r.json()["ingredients"] == ["flour, 200 g"]
+
+
+def test_small_factor_never_rounds_to_zero():
+    rid = make_recipe(["0.1 tsp salt", "2.5 kg potatoes"])
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 0.01})
+    assert r.status_code == 200
+    assert r.json()["ingredients"] == ["0.001 tsp salt", "0.025 kg potatoes"]
+
+
+def test_largest_allowed_factor():
+    rid = make_recipe(["200 g flour"])
+    r = client.get(f"/recipes/{rid}/scaled", params={"factor": 1000})
+    assert r.status_code == 200
+    assert r.json()["ingredients"] == ["200000 g flour"]
+
+
+@pytest.mark.parametrize(
+    "factor", ["0", "-2", "abc", "", "nan", "inf", "1000.5", "1e300", "1e308", "1e309"]
+)
 def test_bad_factor_returns_422(factor):
     rid = make_recipe(["200 g flour"])
     r = client.get(f"/recipes/{rid}/scaled", params={"factor": factor})
@@ -102,6 +151,16 @@ def test_missing_factor_returns_422():
         ("1/2 cup milk", 2, "1/2 cup milk"),
         ("2-3 eggs", 2, "2-3 eggs"),
         ("100", 2, "200"),
+        ("0.1 tsp salt", 0.01, "0.001 tsp salt"),
+        ("2 eggs", 1e-9, "0.000000002 eggs"),
+        ("1 1/2 cups flour", 2, "1 1/2 cups flour"),
+        ("1 ½ cups flour", 2, "1 ½ cups flour"),
+        ("٢٠٠ g flour", 2, "٢٠٠ g flour"),
+        (" 200 g sugar", 2, "400 g sugar"),
+        ("flour, 200 g", 2, "flour, 200 g"),
+        ("200 (7 oz) flour", 2, "200 (7 oz) flour"),
+        ("1" + "0" * 300 + " g flour", 1000, "1" + "0" * 300 + " g flour"),
+        ("9" * 400 + " g flour", 2, "9" * 400 + " g flour"),
     ],
 )
 def test_scale_ingredient(ingredient, factor, expected):
@@ -110,7 +169,16 @@ def test_scale_ingredient(ingredient, factor, expected):
 
 @pytest.mark.parametrize(
     "value, expected",
-    [(400.0, "400"), (0.5, "0.5"), (0.75, "0.75"), (1 / 3, "0.33"), (10.0, "10")],
+    [
+        (400.0, "400"),
+        (0.5, "0.5"),
+        (0.75, "0.75"),
+        (1 / 3, "0.33"),
+        (10.0, "10"),
+        (0.001, "0.001"),
+        (0.00123, "0.0012"),
+        (0.0, "0"),
+    ],
 )
 def test_format_quantity(value, expected):
     assert format_quantity(value) == expected

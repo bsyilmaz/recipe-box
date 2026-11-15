@@ -11,6 +11,7 @@ Test:
     pytest
 """
 import json
+import math
 import re
 import sqlite3
 from contextlib import closing
@@ -100,31 +101,50 @@ def get_recipe(recipe_id: int):
     return _load_recipe(recipe_id)
 
 
-# Parsing rule: an ingredient is scaled only when it STARTS with a plain number,
-# an integer ("200") or a dot decimal ("1.5"), followed by a space, a letter or the
-# end of the text ("200 g flour", "1.5kg rice", "3"). Anything else is returned
-# unchanged on purpose: no leading number ("salt to taste"), fractions
-# ("1/2 cup milk"), ranges ("2-3 eggs"), comma decimals ("1,5 l water").
-# Results are rounded to 2 decimals.
-LEADING_QUANTITY = re.compile(r"^(\d+(?:\.\d+)?)(?=\s|[^\W\d_]|$)")
+# Parsing rule: an ingredient is scaled only when, after any leading whitespace, it
+# STARTS with a plain ASCII number, an integer ("200") or a dot decimal ("1.5"),
+# and the next non-space character is an ASCII letter or the end of the text:
+#   "200 g flour" -> scaled,  "1.5kg rice" -> scaled,  "3" -> scaled,
+#   " 200 g sugar" -> scaled (leading whitespace is dropped in the result).
+# Everything else is returned unchanged on purpose:
+#   no leading number ("salt to taste"), quantity not first ("flour, 200 g"),
+#   fractions ("1/2 cup"), mixed numbers ("1 1/2 cups", "1 ½ cups"),
+#   ranges ("2-3 eggs"), comma decimals ("1,5 l"), non-ASCII digits ("٢٠٠ g", "２００ g").
+LEADING_QUANTITY = re.compile(r"^\s*(\d+(?:\.\d+)?)(?=\s*[A-Za-z]|\s*$)", re.ASCII)
+
+MAX_FACTOR = 1000  # larger factors get a 422
+MAX_QUANTITY = 1e15  # a scaled result this big (or inf) leaves the ingredient unchanged
 
 
 def format_quantity(value: float) -> str:
-    """Round to 2 decimals and drop trailing zeros: 400.0 -> "400", 0.50 -> "0.5"."""
-    return f"{value:.2f}".rstrip("0").rstrip(".")
+    """2 decimals for values >= 1, 2 significant figures below 1, no trailing zeros.
+
+    400.0 -> "400", 0.5 -> "0.5", 1/3 -> "0.33", 0.001 -> "0.001", 0.00123 -> "0.0012".
+    A non-zero value never rounds to "0".
+    """
+    if value == 0:
+        return "0"
+    decimals = max(2, 1 - math.floor(math.log10(abs(value))))
+    return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
 
 
 def scale_ingredient(ingredient: str, factor: float) -> str:
     match = LEADING_QUANTITY.match(ingredient)
     if match is None:
         return ingredient
-    return format_quantity(float(match.group(1)) * factor) + ingredient[match.end():]
+    scaled = float(match.group(1)) * factor
+    if scaled >= MAX_QUANTITY:  # absurd input like a 300-digit number: leave it alone
+        return ingredient
+    return format_quantity(scaled) + ingredient[match.end():]
 
 
 @app.get("/recipes/{recipe_id}/scaled")
 def get_scaled_recipe(
     recipe_id: int,
-    factor: float = Query(..., gt=0, allow_inf_nan=False, description="multiplier, must be > 0"),
+    factor: float = Query(
+        ..., gt=0, le=MAX_FACTOR, allow_inf_nan=False,
+        description=f"multiplier, 0 < factor <= {MAX_FACTOR}",
+    ),
 ):
     """Same shape as GET /recipes/{id}, ingredients scaled. The stored recipe is not changed."""
     recipe = _load_recipe(recipe_id)
